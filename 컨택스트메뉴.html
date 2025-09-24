@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Minimal Vanilla Context Menu (Multi-level)</title>
+  <style>
+    /* === 최소 스타일 === */
+    html,body{height:100%}
+    body{margin:0;font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Pretendard, "Noto Sans KR", sans-serif}
+    .playground{height:100%;display:flex;align-items:center;justify-content:center;background:#f5f7fb}
+    .area{min-width:340px;min-height:180px;border:2px dashed #d0d6e3;border-radius:10px;background:#fff;color:#445;display:flex;align-items:center;justify-content:center}
+    .hint{position:fixed;left:12px;bottom:12px;color:#667} 
+
+    /* === 컨텍스트 메뉴 === */
+    .ctx{position:fixed;display:none;min-width:200px;background:#fff;border:1px solid #d9dfea;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:4px;z-index:9999}
+    .ctx[data-open="true"]{display:block}
+    .ctx .item{display:flex;align-items:center;gap:8px;width:100%}
+    .ctx .item{padding:8px 10px;border-radius:6px;background:none;border:0;text-align:left;cursor:pointer}
+    .ctx .item[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
+    .ctx .item:not([aria-disabled="true"]):hover{background:#f0f3fa}
+    .ctx .sep{height:1px;background:#e7ecf5;margin:4px}
+    .ctx .right{margin-left:auto;opacity:.6}
+
+    /* === 서브메뉴 패널 === */
+    .submenu{position:absolute;top:0;left:100%;margin-left:6px;display:none;min-width:180px;background:#fff;border:1px solid #d9dfea;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:4px}
+    .item[aria-expanded="true"] + .submenu{display:block}
+  </style>
+</head>
+<body>
+  <div class="playground">
+    <div id="target" class="area" tabindex="0">여기서 우클릭 (또는 Shift+F10)</div>
+    <div class="hint">ESC로 닫기, ←/→로 서브로 이동</div>
+  </div>
+
+  <!-- 컨테이너 한 개만 두고 JS로 구조 구성 -->
+  <div id="ctx" class="ctx" role="menu" aria-label="Context menu"></div>
+
+  <script>
+  // 아주 단순한 엘리먼트 유틸
+  const el=(t,a={},...c)=>{const n=document.createElement(t);for(const[k,v]of Object.entries(a)){if(k.startsWith('on'))n[k]=v;else if(k==='text')n.textContent=v;else n.setAttribute(k,v)};for(const x of c){if(x!=null)n.appendChild(typeof x==='string'?document.createTextNode(x):x)}return n}
+
+  class SimpleContextMenu{
+    static registry = new Set();
+    static closeAllExcept(inst){ for(const m of SimpleContextMenu.registry){ if(m!==inst) m.close(); } }
+    constructor(root){this.root=root;this.items=[];this.ctx={};this.boundOutside=(e)=>{if(!this.root.contains(e.target))this.close()}; SimpleContextMenu.registry.add(this);} 
+    setItems(items){this.items=items;return this}
+    open(x,y,ctx={}){ SimpleContextMenu.closeAllExcept(this); this.ctx=ctx;this.render();this.place(x,y);this.root.dataset.open='true';
+      document.addEventListener('pointerdown',this.boundOutside,{capture:true});
+      document.addEventListener('keydown',this)
+    }
+    close(){this.root.dataset.open='false';this.root.innerHTML='';
+      document.removeEventListener('pointerdown',this.boundOutside,{capture:true});
+      document.removeEventListener('keydown',this)
+    }
+    place(x,y){const r=this.root.getBoundingClientRect();const vw=innerWidth,vh=innerHeight;let lx=x,ty=y; if(lx+r.width>vw-8)lx=Math.max(8,vw-r.width-8); if(ty+r.height>vh-8)ty=Math.max(8,vh-r.height-8); this.root.style.left=lx+'px';this.root.style.top=ty+'px'}
+    handleEvent(e){if(e.type==='keydown'){const f=[...this.root.querySelectorAll('.item:not([aria-disabled="true"])')];const i=f.indexOf(document.activeElement);
+        if(e.key==='Escape'){this.close();e.preventDefault()}
+        else if(e.key==='ArrowDown'){(f[i+1]||f[0])?.focus();e.preventDefault()}
+        else if(e.key==='ArrowUp'){(f[i-1]||f.at(-1))?.focus();e.preventDefault()}
+        else if(e.key==='ArrowRight'){const cur=document.activeElement;if(cur?.dataset.hasSub==='1'){cur.setAttribute('aria-expanded','true');cur.nextElementSibling?.querySelector('.item:not([aria-disabled="true"])')?.focus();e.preventDefault()}}
+        else if(e.key==='ArrowLeft'){const sub=document.activeElement?.closest('.submenu');const trigger=sub?.previousElementSibling;if(trigger){trigger.focus();trigger.setAttribute('aria-expanded','false');e.preventDefault()}}
+        else if(e.key==='Enter' || e.key===' '){document.activeElement?.click();e.preventDefault()}}}
+    collapseAll(from=this.root){ from.querySelectorAll('.item[aria-expanded="true"]').forEach(b=>b.setAttribute('aria-expanded','false')); }
+
+    render(){ this.root.innerHTML='';const wrap=el('div');this._renderItems(this.items,wrap);this.root.appendChild(wrap);
+      // 첫 포커스
+      const first=this.root.querySelector('.item:not([aria-disabled="true"])'); first&&first.focus();
+    }
+    _renderItems(items,container){
+      items.forEach(it=>{
+        if(it==='sep'){container.appendChild(el('div',{class:'sep'}));return}
+        const dis=typeof it.disabled==='function'?!!it.disabled(this.ctx):!!it.disabled;
+        const hasSub=Array.isArray(it.children)&&it.children.length>0;
+        const btn=el('button',{class:'item',role:'menuitem','aria-disabled':String(dis),tabindex:dis?'-1':'0',
+          ...(hasSub?{'data-has-sub':'1','aria-expanded':'false'}:{}),
+          onpointerdown:(e)=>e.preventDefault(),
+          onclick:()=>{ if(dis)return; if(hasSub){ btn.parentElement.querySelectorAll('.item[aria-expanded="true"]').forEach(b=>{ if(b!==btn) b.setAttribute('aria-expanded','false'); }); btn.setAttribute('aria-expanded', btn.getAttribute('aria-expanded')==='true'?'false':'true'); return; } this.collapseAll(); it.action&&it.action(this.ctx); this.close(); }
+        }, it.icon?el('span',{text:it.icon}):null, el('span',{text:it.label||''}), hasSub?el('span',{class:'right',text:'▶'}):null);
+        container.appendChild(btn);
+        if(hasSub){const sub=el('div',{class:'submenu',role:'menu'}); this._renderItems(it.children,sub); container.appendChild(sub)}
+      })
+    }
+  }
+
+  // 메뉴 인스턴스 생성 및 항목 구성(다중 서브메뉴 예시)
+  const menu=new SimpleContextMenu(document.getElementById('ctx')).setItems([
+    {id:'open',label:'열기',action:(c)=>console.log('열기',c)},
+    {id:'new',label:'새로 만들기',children:[
+      {id:'new-file',label:'파일',action:(c)=>console.log('파일 생성',c)},
+      {id:'new-folder',label:'폴더',action:(c)=>console.log('폴더 생성',c)},
+      'sep',
+      {id:'template',label:'템플릿',children:[
+        {id:'tpl-doc',label:'문서',action:(c)=>console.log('템플릿:문서',c)},
+        {id:'tpl-sheet',label:'스프레드시트',action:(c)=>console.log('템플릿:시트',c)},
+      ]}
+    ]},
+    'sep',
+    {id:'view',label:'보기',children:[
+      {id:'sort',label:'정렬',children:[
+        {id:'by-name',label:'이름순',action:(c)=>console.log('정렬:이름',c)},
+        {id:'by-date',label:'날짜순',action:(c)=>console.log('정렬:날짜',c)},
+        {id:'by-size',label:'크기순',action:(c)=>console.log('정렬:크기',c)},
+      ]},
+      {id:'layout',label:'레이아웃',children:[
+        {id:'grid',label:'그리드',action:(c)=>console.log('레이아웃:그리드',c)},
+        {id:'list',label:'리스트',action:(c)=>console.log('레이아웃:리스트',c)},
+      ]}
+    ]},
+    'sep',
+    {id:'share',label:'공유',children:[
+      {id:'link',label:'링크 복사',action:(c)=>console.log('링크 복사',c)},
+      {id:'perm',label:'권한 설정',children:[
+        {id:'viewer',label:'보기 전용',action:(c)=>console.log('권한:보기',c)},
+        {id:'editor',label:'편집 가능',action:(c)=>console.log('권한:편집',c)},
+      ]}
+    ]},
+    'sep',
+    {id:'delete',label:'삭제',action:(c)=>console.log('삭제',c)}
+  ]);
+
+  // 타깃 요소 우클릭/키보드 오픈
+  const target=document.getElementById('target');
+  target.addEventListener('contextmenu',(e)=>{e.preventDefault();menu.open(e.clientX,e.clientY,{name:'demo'})});
+  target.addEventListener('keydown',(e)=>{if(e.shiftKey&&e.key==='F10'){const r=target.getBoundingClientRect();menu.open(r.left+12,r.top+12,{name:'demo'})}})
+
+  // 스크롤/리사이즈 시 닫기 (간단 처리)
+  addEventListener('scroll',()=>menu.close(),true);
+  addEventListener('resize',()=>menu.close());
+  </script>
+</body>
+</html>
