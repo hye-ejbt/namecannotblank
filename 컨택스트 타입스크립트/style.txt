@@ -1,0 +1,13 @@
+/* 최소 스타일 */
+#ctx { position: fixed; display: none; min-width: 200px; background: #fff;
+  border: 1px solid #d9dfea; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 4px; z-index: 9999; }
+#ctx[data-open="true"] { display: block; }
+#ctx .item { display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 10px; border-radius: 6px; background: none; border: 0; text-align: left; cursor: pointer; }
+#ctx .item[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+#ctx .item:not([aria-disabled="true"]):hover { background: #f0f3fa; }
+#ctx .sep { height: 1px; background: #e7ecf5; margin: 4px; }
+#ctx .right { margin-left: auto; opacity: .6; }
+.submenu { position: absolute; top: 0; left: 100%; margin-left: 6px; display: none; min-width: 180px;
+  background: #fff; border: 1px solid #d9dfea; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 4px; }
+.item[aria-expanded="true"] + .submenu { display: block; }
