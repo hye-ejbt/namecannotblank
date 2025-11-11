@@ -1,0 +1,68 @@
+interface CourseLink {
+  cid: number;
+  seq: number;
+  map_id: number;
+  link_id: number;
+  st_nd_id: number;
+  ed_nd_id: number;
+  link_map_id: number;
+  oneway_name: string;
+}
+
+/**
+ * 개선된 주행 코스도로 연속성 검사
+ * (C++ 원본 로직 기반 + 실제 데이터 특성 반영)
+ */
+function checkDrivingCourseConnectivity(course: CourseLink[]): {
+  valid: boolean;
+  breaks: { seq: number; reason: string }[];
+} {
+  const breaks: { seq: number; reason: string }[] = [];
+
+  for (let i = 0; i < course.length - 1; i++) {
+    const cur = course[i];
+    const next = course[i + 1];
+
+    // --- 1️⃣ 동일 map 내에서 기본 연결 (일반적인 경우) ---
+    const isSameMap = cur.map_id === next.map_id;
+    const isDirect = cur.ed_nd_id === next.st_nd_id;
+
+    // --- 2️⃣ link_map_id 기준 연결성 (같은 물리 네트워크 상이면 OK) ---
+    const isSameNetwork = cur.link_map_id === next.link_map_id;
+
+    // --- 3️⃣ map 경계 넘어가는 경우 (adjNode 개념 대체) ---
+    const isCrossMapConnected =
+      !isSameMap &&
+      (cur.ed_nd_id === next.st_nd_id ||
+        cur.ed_nd_id === next.ed_nd_id ||
+        cur.st_nd_id === next.st_nd_id ||
+        cur.st_nd_id === next.ed_nd_id ||
+        isSameNetwork);
+
+    // --- 4️⃣ 방향 규제 체크 ---
+    const isDirectionValid = (() => {
+      const a = cur.oneway_name ?? "규제없음";
+      const b = next.oneway_name ?? "규제없음";
+      if (a.includes("역방향") || b.includes("역방향")) return false;
+      return true;
+    })();
+
+    // --- 5️⃣ 최종 연결성 판단 ---
+    if (!(isDirect || isCrossMapConnected || isSameNetwork)) {
+      breaks.push({
+        seq: cur.seq,
+        reason: `노드 불일치 (cur.ed_nd_id=${cur.ed_nd_id}, next.st_nd_id=${next.st_nd_id})`,
+      });
+    } else if (!isDirectionValid) {
+      breaks.push({
+        seq: cur.seq,
+        reason: `역방향 통행 불가 (${cur.oneway_name} / ${next.oneway_name})`,
+      });
+    }
+  }
+
+  return {
+    valid: breaks.length === 0,
+    breaks,
+  };
+}
