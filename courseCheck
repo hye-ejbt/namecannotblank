@@ -19,41 +19,36 @@ function checkDrivingCourseConnectivity(course: CourseLink[]): {
     const cur = course[i];
     const next = course[i + 1];
 
-    // --- 1️⃣ 방향 규제 체크 ---
+    // --- 1️⃣ 방향 규제 ---
     const aDir = cur.oneway_name ?? "규제없음";
     const bDir = next.oneway_name ?? "규제없음";
     const isDirectionValid = !(
       aDir.includes("역방향") || bDir.includes("역방향")
     );
 
-    // --- 2️⃣ 기본 연결성 ---
+    // --- 2️⃣ 기본 연결 (노드 직접 연결) ---
     const isDirect = cur.ed_nd_id === next.st_nd_id;
-    const isReverse = cur.st_nd_id === next.ed_nd_id;
-    const isNodeTouching =
-      cur.ed_nd_id === next.ed_nd_id || cur.st_nd_id === next.st_nd_id;
 
-    // --- 3️⃣ 지도 경계 연결성 (adjNode 개념) ---
-    const isCrossMap =
-      cur.map_id !== next.map_id || cur.link_map_id !== next.link_map_id;
+    // --- 3️⃣ 지도 경계 연결 (adjNode 개념) ---
+    const isMapTransition =
+      cur.ed_link_map_id !== next.st_link_map_id ||
+      cur.map_id !== next.map_id;
 
     const isCrossMapConnected =
-      isCrossMap &&
-      (cur.link_map_id === next.link_map_id ||
-        cur.map_id === next.link_map_id ||
+      isMapTransition &&
+      (cur.ed_link_map_id === next.st_link_map_id ||
+        cur.ed_link_map_id === next.map_id ||
+        cur.map_id === next.st_link_map_id ||
         cur.ed_nd_id === next.st_nd_id ||
-        cur.ed_nd_id === next.ed_nd_id ||
-        cur.st_nd_id === next.st_nd_id ||
-        cur.st_nd_id === next.ed_nd_id);
+        cur.ed_nd_id === next.ed_nd_id);
 
-    // --- 4️⃣ 최종 연결성 판정 ---
-    const connected =
-      (isDirect || isReverse || isNodeTouching || isCrossMapConnected) &&
-      isDirectionValid;
+    // --- 4️⃣ 최종 연결성 판단 ---
+    const connected = (isDirect || isCrossMapConnected) && isDirectionValid;
 
     if (!connected) {
       breaks.push({
         seq: cur.seq,
-        reason: `연결 실패: [${cur.link_id}](${cur.map_id}) → [${next.link_id}](${next.map_id})`,
+        reason: `연결 실패: [${cur.link_id}](${cur.ed_link_map_id}) → [${next.link_id}](${next.st_link_map_id})`,
       });
     }
   }
