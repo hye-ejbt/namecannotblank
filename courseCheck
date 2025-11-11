@@ -9,10 +9,6 @@ interface CourseLink {
   oneway_name: string;
 }
 
-/**
- * 개선된 주행 코스도로 연속성 검사
- * (C++ 원본 로직 기반 + 실제 데이터 특성 반영)
- */
 function checkDrivingCourseConnectivity(course: CourseLink[]): {
   valid: boolean;
   breaks: { seq: number; reason: string }[];
@@ -23,40 +19,41 @@ function checkDrivingCourseConnectivity(course: CourseLink[]): {
     const cur = course[i];
     const next = course[i + 1];
 
-    // --- 1️⃣ 동일 map 내에서 기본 연결 (일반적인 경우) ---
-    const isSameMap = cur.map_id === next.map_id;
+    // --- 1️⃣ 방향 규제 체크 ---
+    const aDir = cur.oneway_name ?? "규제없음";
+    const bDir = next.oneway_name ?? "규제없음";
+    const isDirectionValid = !(
+      aDir.includes("역방향") || bDir.includes("역방향")
+    );
+
+    // --- 2️⃣ 기본 연결성 ---
     const isDirect = cur.ed_nd_id === next.st_nd_id;
+    const isReverse = cur.st_nd_id === next.ed_nd_id;
+    const isNodeTouching =
+      cur.ed_nd_id === next.ed_nd_id || cur.st_nd_id === next.st_nd_id;
 
-    // --- 2️⃣ link_map_id 기준 연결성 (같은 물리 네트워크 상이면 OK) ---
-    const isSameNetwork = cur.link_map_id === next.link_map_id;
+    // --- 3️⃣ 지도 경계 연결성 (adjNode 개념) ---
+    const isCrossMap =
+      cur.map_id !== next.map_id || cur.link_map_id !== next.link_map_id;
 
-    // --- 3️⃣ map 경계 넘어가는 경우 (adjNode 개념 대체) ---
     const isCrossMapConnected =
-      !isSameMap &&
-      (cur.ed_nd_id === next.st_nd_id ||
+      isCrossMap &&
+      (cur.link_map_id === next.link_map_id ||
+        cur.map_id === next.link_map_id ||
+        cur.ed_nd_id === next.st_nd_id ||
         cur.ed_nd_id === next.ed_nd_id ||
         cur.st_nd_id === next.st_nd_id ||
-        cur.st_nd_id === next.ed_nd_id ||
-        isSameNetwork);
+        cur.st_nd_id === next.ed_nd_id);
 
-    // --- 4️⃣ 방향 규제 체크 ---
-    const isDirectionValid = (() => {
-      const a = cur.oneway_name ?? "규제없음";
-      const b = next.oneway_name ?? "규제없음";
-      if (a.includes("역방향") || b.includes("역방향")) return false;
-      return true;
-    })();
+    // --- 4️⃣ 최종 연결성 판정 ---
+    const connected =
+      (isDirect || isReverse || isNodeTouching || isCrossMapConnected) &&
+      isDirectionValid;
 
-    // --- 5️⃣ 최종 연결성 판단 ---
-    if (!(isDirect || isCrossMapConnected || isSameNetwork)) {
+    if (!connected) {
       breaks.push({
         seq: cur.seq,
-        reason: `노드 불일치 (cur.ed_nd_id=${cur.ed_nd_id}, next.st_nd_id=${next.st_nd_id})`,
-      });
-    } else if (!isDirectionValid) {
-      breaks.push({
-        seq: cur.seq,
-        reason: `역방향 통행 불가 (${cur.oneway_name} / ${next.oneway_name})`,
+        reason: `연결 실패: [${cur.link_id}](${cur.map_id}) → [${next.link_id}](${next.map_id})`,
       });
     }
   }
