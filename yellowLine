@@ -1,0 +1,83 @@
+import React, { useState } from "react";
+
+interface BlueBlockProps {
+  divCount: number;
+}
+
+const BlueBlocksWithLine: React.FC<BlueBlockProps> = ({ divCount }) => {
+  const divWidth = 100;
+  const divHeight = 175;
+  const totalWidth = divCount * divWidth;
+
+  const lineWidth = 5; // 노란 선 두께
+  const verticalLength = 100; // 수직선 길이
+
+  // 박스 내부 기준 끝점 계산 (노란 선 두께 보정)
+  const dx = totalWidth - lineWidth;
+  const dy = divHeight - verticalLength - lineWidth;
+
+  // 자동 각도 및 길이 계산
+  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const diagonalLength = Math.sqrt(dx * dx + dy * dy);
+
+  return (
+    <div className="relative flex justify-center items-end mt-8">
+      {/* 파란 블록 */}
+      <div
+        className="flex border border-gray-400 relative bg-blue-300"
+        style={{ width: `${totalWidth}px`, height: `${divHeight}px` }}
+      >
+        {Array.from({ length: divCount }).map((_, i) => (
+          <div
+            key={i}
+            className="w-[100px] h-full border border-blue-600"
+          ></div>
+        ))}
+
+        {/* 노란 선 (박스 내부) */}
+        <div className="absolute left-0 top-0 flex flex-col items-start">
+          {/* 수직선 */}
+          <div
+            className="bg-yellow-400"
+            style={{
+              width: `${lineWidth}px`,
+              height: `${verticalLength}px`,
+            }}
+          ></div>
+
+          {/* 대각선 */}
+          <div
+            className="bg-yellow-400 origin-top-left"
+            style={{
+              width: `${diagonalLength}px`,
+              height: `${lineWidth}px`,
+              transform: `rotate(${angle}deg)`,
+            }}
+          ></div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 테스트용
+export default function App() {
+  const [count, setCount] = useState(3);
+
+  return (
+    <div className="flex flex-col items-center gap-6 mt-10">
+      <h1 className="text-lg font-bold">노란선 두께 보정 버전</h1>
+      <div className="flex items-center gap-3">
+        <label>div 개수:</label>
+        <input
+          type="number"
+          value={count}
+          min={1}
+          onChange={(e) => setCount(Number(e.target.value))}
+          className="border rounded px-2 py-1 w-20 text-center"
+        />
+      </div>
+      <BlueBlocksWithLine divCount={count} />
+    </div>
+  );
+}
