@@ -104,6 +104,47 @@ const CombinedModal: React.FC = () => {
   /* =========================
      handlers (SELECTION ONLY)
   ========================= */
+const addArrow = () => {
+  if (!selectedPattern) {
+    message.error('코드를 선택해주세요.');
+    return;
+  }
+  if (!selectedArrow) {
+    message.error('Arrow ID를 입력해주세요.');
+    return;
+  }
+
+  setPatternMappingArrowList(prev => {
+    const map = new Map<string, PatternMappingArrow>();
+
+    // 기존 데이터 복사
+    for (const item of prev) {
+      map.set(
+        `${item.patternId}_${item.outLink}`,
+        { ...item, list: [...item.list] }
+      );
+    }
+
+    const key = `${selectedPattern}_${regType.outLink}`;
+    const item = map.get(key);
+
+    if (!item) {
+      map.set(key, {
+        patternId: selectedPattern,
+        outLink: regType.outLink,
+        list: [selectedArrow],
+      });
+    } else if (!item.list.includes(selectedArrow)) {
+      item.list.push(selectedArrow);
+    }
+
+    return Array.from(map.values());
+  });
+
+  setSelectedArrow('');
+};
+
+  
   const onSelectPattern = (patternId: string) => {
     setSelectedPattern(prev =>
       prev === patternId ? '' : patternId
