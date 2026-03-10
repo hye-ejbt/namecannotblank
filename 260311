@@ -1,0 +1,56 @@
+export function buildBranchDiffPayload(
+  branches: BranchMappingMap[]
+): regType[] {
+
+  const result: regType[] = [];
+
+  for (const branch of branches) {
+
+    const { crossType, inLink } = branch;
+
+    for (const pattern of branch.patterns.values()) {
+
+      const patternChanged =
+        pattern.patternId !== pattern.originPatternId;
+
+      for (const arrow of pattern.arrows.values()) {
+
+        const arrowChanged =
+          arrow.arrowId !== arrow.originArrowId;
+
+        // 변경 없으면 skip
+        if (!patternChanged && !arrowChanged) continue;
+
+        // outLink 자동 계산 (첫번째 기준)
+        const firstOutLink =
+          [...arrow.outLinks.values()][0];
+
+        const outLink = firstOutLink?.outLinkId ?? 0;
+
+        result.push({
+          crossType,
+          nodeId: 0, // 필요 시 외부에서 주입
+          inLink,
+          outLink,
+
+          pattern: pattern.patternId,
+
+          arrowId: arrow.originArrowId,
+          newArrowId: arrow.arrowId,
+
+          arrowCnt: pattern.arrows.size,
+
+          circleCnt: null,
+          guideCd: undefined,
+          guideLaneList: undefined,
+          nodeMapId: undefined
+        });
+
+      }
+
+    }
+
+  }
+
+  return result;
+}
