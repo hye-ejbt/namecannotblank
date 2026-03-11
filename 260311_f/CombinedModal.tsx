@@ -737,6 +737,7 @@ const CombinedModal: React.FC = () => {
         return result;
     }
 
+
     /* ─────────────────────────────────────────────
        8. 저장 (onSave) — prompt.md §3.B CUD 처리
        ─────────────────────────────────────────────
@@ -744,7 +745,7 @@ const CombinedModal: React.FC = () => {
        수정 : arrowId !== newArrowId  → UPDATE (식별자 덮어쓰기)
        삭제 : newArrowId === ''       → DELETE
        충돌 : 수정 결과 arrowId가 신규 추가 arrowId와 중복 → UPDATE 병합
-       부활 : 삭제된 기 구축 데이터와 동일한 신규 데이터     → UPDATE 복원
+       상쇄 : INSERT ∩ DELETE (동일 키가 양쪽에 존재)      → 페이로드에서 양쪽 모두 제거
        ───────────────────────────────────────────── */
     const onSave = async () => {
         const editList = buildBranchDiffPayload();
@@ -830,18 +831,19 @@ const CombinedModal: React.FC = () => {
 
             /**
              * [충돌/병합 예외 처리 2]
-             * 삭제된 기 구축 데이터와 동일한 키를 가진 신규 데이터
-             * → 새로 INSERT 하지 않고 기존 데이터를 살려 UPDATE 로 진행(부활)
+             * INSERT 대상이면서 DELETE 대상이기도 한 경우
+             * → 양쪽 모두 페이로드에서 제거 (서버에 전송하지 않음)
+             *   신규 추가 후 바로 삭제한 것이므로 변경 사항 없음
              */
             if (deleteKeySet.has(addedKey)) {
-                // deleteList 에서 해당 항목을 찾아 action 을 UPDATE 로 변경(부활)
-                const reviveIdx = saveDeleteList.findIndex(
+                // saveDeleteList 에서도 해당 항목 제거
+                const removeIdx = saveDeleteList.findIndex(
                     d => d.pattern === p && d.arrowId === a && String(d.outLink) === o
                 );
-                if (reviveIdx !== -1) {
-                    saveDeleteList[reviveIdx].action = CudAction.UPDATE;
-                    saveDeleteList[reviveIdx].newArrowId = a; // 원래 arrowId 복원
+                if (removeIdx !== -1) {
+                    saveDeleteList.splice(removeIdx, 1);
                 }
+                // INSERT 도 추가하지 않음 → continue
                 continue;
             }
 
@@ -868,7 +870,7 @@ const CombinedModal: React.FC = () => {
 
         /* ── D. 최종 페이로드 병합 및 서버 전송 ── */
         const allPayload: SavePayloadItem[] = [
-            ...saveDeleteList,      // 삭제(또는 부활→UPDATE)
+            ...saveDeleteList,      // 삭제 (INSERT∩DELETE 항목은 이미 제거됨)
             ...saveEditList,        // 수정(UPDATE)
             ...saveAddList          // 신규(INSERT)
         ];
