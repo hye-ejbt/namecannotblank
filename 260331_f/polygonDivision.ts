@@ -4,14 +4,9 @@ import { rootStore } from '@/stores/rootStore';
 import { message } from 'antd';
 import i18next from 'i18next';
 
-/**
- * MultiPolygon → 개별 Polygon Feature 배열로 분리
- */
 function multiToSingle(feature: any): any[] {
   if (!feature || !feature.geometry) return [];
-  if (feature.geometry.type === 'Polygon') {
-    return [feature];
-  }
+  if (feature.geometry.type === 'Polygon') return [feature];
   if (feature.geometry.type === 'MultiPolygon') {
     return feature.geometry.coordinates.map((coords: any) =>
       turf.polygon(coords)
@@ -20,14 +15,11 @@ function multiToSingle(feature: any): any[] {
   return [];
 }
 
-/**
- * 다중 폴리곤 분할
- *
- * 원리: 대상 폴리곤에서 커터 폴리곤들을 순차적으로 difference
- *  - 커터가 대상을 관통하면 → MultiPolygon (조각 분리)
- *  - 커터가 대상 가장자리만 겹치면 → Polygon (깎임만)
- *  - 커터가 대상을 완전히 덮으면 → null (남은 영역 없음)
- */
+function countPieces(feature: any): number {
+  if (!feature) return 0;
+  return multiToSingle(feature).length;
+}
+
 export const progressPolygonDivision = (
   targetPolygon: Place,
   polygonList: Place[]
@@ -62,9 +54,9 @@ export const progressPolygonDivision = (
     );
   }
 
-  console.log('[Division] 대상 폴리곤 면적:', turf.area(base).toFixed(2), 'm²');
+  // ── 3. 순차 분할 ──
+  const collectedPieces: any[] = []; // 관통 시 수집된 intersect 조각들
 
-  // ── 3. 커터 폴리곤들을 순차적으로 difference ──
   for (let i = 0; i < polygonCoords.length; i++) {
     if (!base) break;
 
@@ -73,50 +65,62 @@ export const progressPolygonDivision = (
       coordinates: 2,
     });
     const pBuf = turf.buffer(cutter, -eps, { units: 'meters' });
-
-    if (!pBuf) {
-      console.warn(`[Division] 커터 ${i + 1}: buffer 실패, 건너뜀`);
-      continue;
-    }
+    if (!pBuf) continue;
 
     try {
+      const beforeCount = countPieces(base);
       const diff = turf.difference(base, pBuf);
 
       if (!diff) {
-        console.warn(`[Division] 커터 ${i + 1}: 대상을 완전히 덮음 → 남은 영역 없음`);
+        // 커터가 대상을 완전히 덮음
         base = null;
         break;
       }
 
-      console.log(
-        `[Division] 커터 ${i + 1}: ${base.geometry.type} → ${diff.geometry.type}`,
-        diff.geometry.type === 'MultiPolygon'
-          ? `(${diff.geometry.coordinates.length}개 조각)`
-          : '(1개)'
-      );
+      const afterCount = countPieces(diff);
+
+      // 관통 판별: 조각 수가 늘어났으면 커터가 관통한 것
+      if (afterCount > beforeCount) {
+        const inter = turf.intersect(base, pBuf);
+        if (inter) {
+          // intersect 결과를 개별 조각으로 수집
+          multiToSingle(inter).forEach((p: any) => collectedPieces.push(p));
+          console.log(
+            `[Division] 커터 ${i + 1}: 관통 → ${beforeCount}조각 → ${afterCount}조각, intersect ${multiToSingle(inter).length}개 수집`
+          );
+        }
+      } else {
+        console.log(
+          `[Division] 커터 ${i + 1}: 비관통 (깎임만), ${afterCount}조각 유지`
+        );
+      }
 
       base = diff;
     } catch (e) {
-      console.error(`[Division] 커터 ${i + 1}: difference 에러`, e);
-      continue;
+      console.error(`[Division] 커터 ${i + 1}: 에러`, e);
     }
   }
 
-  // ── 4. 결과 처리 ──
-  if (!base) {
+  // ── 4. 최종 조각 조립: difference 결과 + 수집된 intersect 조각 ──
+  const allPieces: any[] = [
+    ...multiToSingle(base),   // diff로 남은 조각들
+    ...collectedPieces,        // 관통 시 수집된 교차 조각들
+  ];
+
+  console.log(
+    `[Division] 최종: diff ${countPieces(base)}개 + intersect ${collectedPieces.length}개 = ${allPieces.length}개`
+  );
+
+  if (allPieces.length < 1) {
     return message.error(
       i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
     );
   }
 
-  // 개별 조각으로 분리
-  const singles = multiToSingle(base);
-  console.log(`[Division] 최종 조각 수: ${singles.length}`);
-
-  // 각 조각 정리 (simplify + buffer)
+  // ── 5. 각 조각 정리 ──
   const cleanedCoords: any[] = [];
 
-  for (const piece of singles) {
+  for (const piece of allPieces) {
     try {
       const poly = turf.polygon(piece.geometry.coordinates);
       const buffered = turf.buffer(poly, -eps, { units: 'meters' });
