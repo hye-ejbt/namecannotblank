@@ -15,6 +15,11 @@ function multiToSingle(feature: any): any[] {
   return [];
 }
 
+function countPieces(feature: any): number {
+  if (!feature) return 0;
+  return multiToSingle(feature).length;
+}
+
 function preparePolygon(coords: any[][], eps: number): any {
   const poly = turf.truncate(turf.polygon(coords), {
     precision: 6,
@@ -66,87 +71,74 @@ export const progressPolygonDivision = (
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  1단계: 첫 번째 커터로 분할 (관통 적용)
-  // ══════════════════════════════════════════════
-  const firstCutter = preparePolygon(polygonCoords[0], eps);
-  if (!firstCutter) {
-    return message.error(
-      i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
-    );
-  }
+  // ══════════════════════════════════════════════════════════
+  //  반복 분할: 각 커터마다 관통 판별 후 마지막 조각을 다음으로
+  // ══════════════════════════════════════════════════════════
+  //
+  //  관통 시:
+  //    diff  → [A, B]     inter → [C]
+  //    확정: [C(inter), A(diff 앞쪽)]
+  //    다음 커터로: B(diff 마지막)
+  //
+  //  비관통 시:
+  //    diff → 깎인 결과
+  //    확정 없음, 다음 커터로: diff 결과 그대로
+  //
+  const confirmedPieces: any[] = [];
+  let current: any = base;
 
-  const beforeCount = multiToSingle(base).length;
-  const diff = turf.difference(base, firstCutter);
-
-  if (!diff) {
-    return message.error(
-      i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
-    );
-  }
-
-  const afterCount = multiToSingle(diff).length;
-  const isCrossing = afterCount > beforeCount;
-
-  let pieces: any[] = []; // 1단계에서 확정된 앞쪽 조각들
-  let lastPiece: any;     // 2단계로 넘길 마지막 조각
-
-  if (isCrossing) {
-    // 관통: diff 조각들 + intersect 조각
-    const inter = turf.intersect(base, firstCutter);
-    const diffPieces = multiToSingle(diff);
-    const interPieces = inter ? multiToSingle(inter) : [];
-
-    // diff 조각들 = 확정 (마지막 제외), intersect 조각 = 마지막 조각
-    // 모든 조각을 합쳐서 마지막 하나를 lastPiece로
-    const allFirstStep = [...diffPieces, ...interPieces];
-    pieces = allFirstStep.slice(0, -1);
-    lastPiece = allFirstStep[allFirstStep.length - 1];
-
-    console.log(
-      `[Division] 1단계: 관통 → diff ${diffPieces.length}개 + inter ${interPieces.length}개, 마지막 조각을 2단계로`
-    );
-  } else {
-    // 비관통: diff만 사용
-    lastPiece = diff;
-    console.log('[Division] 1단계: 비관통 → diff를 그대로 2단계로');
-  }
-
-  // ══════════════════════════════════════════════
-  //  2단계: 마지막 조각을 나머지 커터들로 difference
-  // ══════════════════════════════════════════════
-  for (let i = 1; i < polygonCoords.length; i++) {
-    if (!lastPiece) break;
+  for (let i = 0; i < polygonCoords.length; i++) {
+    if (!current) break;
 
     const cutter = preparePolygon(polygonCoords[i], eps);
     if (!cutter) continue;
 
     try {
-      const d = turf.difference(lastPiece, cutter);
-      if (!d) {
-        lastPiece = null;
+      const beforeCount = countPieces(current);
+      const diff = turf.difference(current, cutter);
+
+      if (!diff) {
+        console.warn(`[Division] 커터 ${i + 1}: 대상을 완전히 덮음`);
+        current = null;
         break;
       }
-      console.log(
-        `[Division] 2단계 커터 ${i + 1}: ${lastPiece.geometry.type} → ${d.geometry.type}`
-      );
-      lastPiece = d;
+
+      const afterCount = countPieces(diff);
+
+      if (afterCount > beforeCount) {
+        // ── 관통: intersect 수집 + diff 마지막 조각만 다음으로 ──
+        const inter = turf.intersect(current, cutter);
+        const interPieces = inter ? multiToSingle(inter) : [];
+        const diffPieces = multiToSingle(diff);
+
+        // inter 조각들 → 확정
+        confirmedPieces.push(...interPieces);
+        // diff 앞쪽 조각들 → 확정
+        confirmedPieces.push(...diffPieces.slice(0, -1));
+        // diff 마지막 조각 → 다음 커터로 전달
+        current = diffPieces[diffPieces.length - 1];
+
+        console.log(
+          `[Division] 커터 ${i + 1}: 관통 → inter ${interPieces.length}개 + diff ${diffPieces.length}개 확정, 마지막 조각 계속`
+        );
+      } else {
+        // ── 비관통: 깎임만, 다음으로 ──
+        current = diff;
+        console.log(`[Division] 커터 ${i + 1}: 비관통 (깎임만)`);
+      }
     } catch (e) {
-      console.error(`[Division] 2단계 커터 ${i + 1}: 에러`, e);
+      console.error(`[Division] 커터 ${i + 1}: 에러`, e);
     }
   }
 
-  // ══════════════════════════════════════════════
-  //  결과 조립: 1단계 확정 조각들 + 2단계 결과 조각들
-  // ══════════════════════════════════════════════
-  const allPieces = [
-    ...pieces,
-    ...multiToSingle(lastPiece),
-  ];
+  // ── 마지막 current도 결과에 포함 ──
+  if (current) {
+    confirmedPieces.push(...multiToSingle(current));
+  }
 
-  console.log(`[Division] 최종 조각 수: ${allPieces.length}`);
+  console.log(`[Division] 최종 조각 수: ${confirmedPieces.length}`);
 
-  if (allPieces.length < 1) {
+  if (confirmedPieces.length < 1) {
     return message.error(
       i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
     );
@@ -154,12 +146,14 @@ export const progressPolygonDivision = (
 
   // ── 조각 정리 ──
   const cleanedCoords: any[] = [];
-  for (const piece of allPieces) {
+  for (const piece of confirmedPieces) {
     const clean = cleanPiece(piece, eps);
     if (clean) {
       cleanedCoords.push(clean.geometry.coordinates);
     }
   }
+
+  console.log(`[Division] 정리 후 조각 수: ${cleanedCoords.length}`);
 
   if (cleanedCoords.length >= 1) {
     const final =
