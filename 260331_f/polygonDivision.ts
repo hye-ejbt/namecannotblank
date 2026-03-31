@@ -15,9 +15,27 @@ function multiToSingle(feature: any): any[] {
   return [];
 }
 
-function countPieces(feature: any): number {
-  if (!feature) return 0;
-  return multiToSingle(feature).length;
+function preparePolygon(coords: any[][], eps: number): any {
+  const poly = turf.truncate(turf.polygon(coords), {
+    precision: 6,
+    coordinates: 2,
+  });
+  return turf.buffer(poly, -eps, { units: 'meters' });
+}
+
+function cleanPiece(piece: any, eps: number): any | null {
+  try {
+    const poly = turf.polygon(piece.geometry.coordinates);
+    const buffered = turf.buffer(poly, -eps, { units: 'meters' });
+    if (!buffered) return null;
+    const clean = turf.simplify(buffered, {
+      tolerance: 0.000001,
+      highQuality: true,
+    });
+    return clean && turf.area(clean) > 0.01 ? clean : null;
+  } catch {
+    return null;
+  }
 }
 
 export const progressPolygonDivision = (
@@ -27,7 +45,7 @@ export const progressPolygonDivision = (
   const { polygonModalStore: store } = rootStore;
   const eps = 0.05;
 
-  // ── 1. 좌표 변환 (EPSG:3857 → EPSG:4326) ──
+  // ── 좌표 변환 (EPSG:3857 → EPSG:4326) ──
   const targetCoord = (targetPolygon.getCoordinates() as any[][]).map(
     (ring: any[]) =>
       ring.map((coord: any) => transform(coord, 'EPSG:3857', 'EPSG:4326'))
@@ -41,75 +59,92 @@ export const progressPolygonDivision = (
 
   const pgKind = targetPolygon.getFields().pgKind;
 
-  // ── 2. 대상 폴리곤 준비 ──
-  let base: any = turf.truncate(turf.polygon(targetCoord), {
-    precision: 6,
-    coordinates: 2,
-  });
-  base = turf.buffer(base, -eps, { units: 'meters' });
-
+  let base: any = preparePolygon(targetCoord, eps);
   if (!base) {
     return message.error(
       i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
     );
   }
 
-  // ── 3. 순차 분할 ──
-  const collectedPieces: any[] = []; // 관통 시 수집된 intersect 조각들
+  // ══════════════════════════════════════════════
+  //  1단계: 첫 번째 커터로 분할 (관통 적용)
+  // ══════════════════════════════════════════════
+  const firstCutter = preparePolygon(polygonCoords[0], eps);
+  if (!firstCutter) {
+    return message.error(
+      i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
+    );
+  }
 
-  for (let i = 0; i < polygonCoords.length; i++) {
-    if (!base) break;
+  const beforeCount = multiToSingle(base).length;
+  const diff = turf.difference(base, firstCutter);
 
-    const cutter = turf.truncate(turf.polygon(polygonCoords[i]), {
-      precision: 6,
-      coordinates: 2,
-    });
-    const pBuf = turf.buffer(cutter, -eps, { units: 'meters' });
-    if (!pBuf) continue;
+  if (!diff) {
+    return message.error(
+      i18next.t('PolygonDivision.failed') ?? '폴리곤 분리 연산에 실패했습니다.'
+    );
+  }
+
+  const afterCount = multiToSingle(diff).length;
+  const isCrossing = afterCount > beforeCount;
+
+  let pieces: any[] = []; // 1단계에서 확정된 앞쪽 조각들
+  let lastPiece: any;     // 2단계로 넘길 마지막 조각
+
+  if (isCrossing) {
+    // 관통: diff 조각들 + intersect 조각
+    const inter = turf.intersect(base, firstCutter);
+    const diffPieces = multiToSingle(diff);
+    const interPieces = inter ? multiToSingle(inter) : [];
+
+    // diff 조각들 = 확정 (마지막 제외), intersect 조각 = 마지막 조각
+    // 모든 조각을 합쳐서 마지막 하나를 lastPiece로
+    const allFirstStep = [...diffPieces, ...interPieces];
+    pieces = allFirstStep.slice(0, -1);
+    lastPiece = allFirstStep[allFirstStep.length - 1];
+
+    console.log(
+      `[Division] 1단계: 관통 → diff ${diffPieces.length}개 + inter ${interPieces.length}개, 마지막 조각을 2단계로`
+    );
+  } else {
+    // 비관통: diff만 사용
+    lastPiece = diff;
+    console.log('[Division] 1단계: 비관통 → diff를 그대로 2단계로');
+  }
+
+  // ══════════════════════════════════════════════
+  //  2단계: 마지막 조각을 나머지 커터들로 difference
+  // ══════════════════════════════════════════════
+  for (let i = 1; i < polygonCoords.length; i++) {
+    if (!lastPiece) break;
+
+    const cutter = preparePolygon(polygonCoords[i], eps);
+    if (!cutter) continue;
 
     try {
-      const beforeCount = countPieces(base);
-      const diff = turf.difference(base, pBuf);
-
-      if (!diff) {
-        // 커터가 대상을 완전히 덮음
-        base = null;
+      const d = turf.difference(lastPiece, cutter);
+      if (!d) {
+        lastPiece = null;
         break;
       }
-
-      const afterCount = countPieces(diff);
-
-      // 관통 판별: 조각 수가 늘어났으면 커터가 관통한 것
-      if (afterCount > beforeCount) {
-        const inter = turf.intersect(base, pBuf);
-        if (inter) {
-          // intersect 결과를 개별 조각으로 수집
-          multiToSingle(inter).forEach((p: any) => collectedPieces.push(p));
-          console.log(
-            `[Division] 커터 ${i + 1}: 관통 → ${beforeCount}조각 → ${afterCount}조각, intersect ${multiToSingle(inter).length}개 수집`
-          );
-        }
-      } else {
-        console.log(
-          `[Division] 커터 ${i + 1}: 비관통 (깎임만), ${afterCount}조각 유지`
-        );
-      }
-
-      base = diff;
+      console.log(
+        `[Division] 2단계 커터 ${i + 1}: ${lastPiece.geometry.type} → ${d.geometry.type}`
+      );
+      lastPiece = d;
     } catch (e) {
-      console.error(`[Division] 커터 ${i + 1}: 에러`, e);
+      console.error(`[Division] 2단계 커터 ${i + 1}: 에러`, e);
     }
   }
 
-  // ── 4. 최종 조각 조립: difference 결과 + 수집된 intersect 조각 ──
-  const allPieces: any[] = [
-    ...multiToSingle(base),   // diff로 남은 조각들
-    ...collectedPieces,        // 관통 시 수집된 교차 조각들
+  // ══════════════════════════════════════════════
+  //  결과 조립: 1단계 확정 조각들 + 2단계 결과 조각들
+  // ══════════════════════════════════════════════
+  const allPieces = [
+    ...pieces,
+    ...multiToSingle(lastPiece),
   ];
 
-  console.log(
-    `[Division] 최종: diff ${countPieces(base)}개 + intersect ${collectedPieces.length}개 = ${allPieces.length}개`
-  );
+  console.log(`[Division] 최종 조각 수: ${allPieces.length}`);
 
   if (allPieces.length < 1) {
     return message.error(
@@ -117,29 +152,14 @@ export const progressPolygonDivision = (
     );
   }
 
-  // ── 5. 각 조각 정리 ──
+  // ── 조각 정리 ──
   const cleanedCoords: any[] = [];
-
   for (const piece of allPieces) {
-    try {
-      const poly = turf.polygon(piece.geometry.coordinates);
-      const buffered = turf.buffer(poly, -eps, { units: 'meters' });
-      if (!buffered) continue;
-
-      const clean = turf.simplify(buffered, {
-        tolerance: 0.000001,
-        highQuality: true,
-      });
-
-      if (clean && turf.area(clean) > 0.01) {
-        cleanedCoords.push(clean.geometry.coordinates);
-      }
-    } catch (e) {
-      console.warn('[Division] 조각 정리 실패:', e);
+    const clean = cleanPiece(piece, eps);
+    if (clean) {
+      cleanedCoords.push(clean.geometry.coordinates);
     }
   }
-
-  console.log(`[Division] 정리 후 조각 수: ${cleanedCoords.length}`);
 
   if (cleanedCoords.length >= 1) {
     const final =
