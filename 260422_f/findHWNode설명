@@ -1,0 +1,23 @@
+findHWNode() 진입
+  │
+  ├─ 오류 카운터 체크 (> 10이면 중단)
+  │
+  ├─ pNode → ConNode 조회 (DC FindObj)
+  │
+  ├─ [while Kind==7] 인접 노드 건너뛰기
+  │     └─ AdjNode → PassInfo → CurLink → ConNode 갱신 반복
+  │
+  └─ [for PassInfo 순회]
+       ├─ TCode != 3 스킵
+       ├─ nInOut(진출/진입) 방향에 따라 CurLink 결정
+       │
+       ├─ [ICSAPA or m_bIsRoute]
+       │     └─ hwEditICSAPA() 호출 후 return
+       │
+       ├─ [JCT 객체]
+       │     ├─ IsJC + 고속도로 → m_outLink에 추가 후 재귀 findHWNode()
+       │     └─ IsRoad + 고속도로 → hwEditJCT() 또는 m_mapJctInfo 수집
+       │
+       └─ [ICSAPA 객체]
+             ├─ IsIC + 고속도로 → m_outLink에 추가 후 재귀 findHWNode()
+             └─ 도시고속/IC연결로 → hwEditICSAPA() 또는 m_mapICSAPAInfo 수집
