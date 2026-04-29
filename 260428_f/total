@@ -1,0 +1,102 @@
+<!-- 입력 링크 ID 전체에 대해 후보 도엽을 한 번에 조회 -->
+<select id="selectLinkCandidates" resultType="LinkCandidateVo">
+    SELECT 
+        l.LINK_ID,
+        l.LINK_MAP_ID,
+        l.ST_ND_ID,
+        l.ED_ND_ID,
+        l.LINK_XY_GRS
+    FROM   RTM_LINK l
+    WHERE  l.LINK_ID IN
+    <foreach item="id" collection="linkIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
+
+<select id="selectNodeXy" resultType="org.locationtech.jts.geom.Geometry">
+    SELECT NODE_XY_GRS
+    FROM   RTM_NODE
+    WHERE  NODE_ID     = #{nodeId}
+      AND  NODE_MAP_ID = #{nodeMapId}
+</select>
+
+
+/**
+ * BFS 없이 링크 ID 일괄 조회 + 좌표 기반 도엽 결정.
+ * 
+ * 처리 흐름:
+ *  1. 모든 입력 링크의 후보를 IN 쿼리 한 번으로 조회
+ *  2. 링크 ID가 도엽 간 중복되는 경우(여러 후보가 있는 경우)에만
+ *     시작점 좌표와 가까운 도엽을 선택
+ *  3. 중복이 없으면 그대로 매핑
+ *
+ * 성능 특성:
+ *  - DB 호출 횟수: 링크 14,000개여도 1~2회
+ *  - 메모리 처리: 14,000개 → 수십 ms 내외
+ */
+private Map<String, Integer> getMapIdsByNode(
+        String startNodeId,
+        String startNodeMapId,
+        Collection<String> linkIds) throws IOException {
+
+    if (linkIds.isEmpty()) return Collections.emptyMap();
+
+    // (1) 모든 링크 후보를 IN 쿼리 한 번으로 조회
+    List<LinkCandidateVo> candidates = dao.selectLinkCandidates(
+        Map.of("linkIds", linkIds));
+
+    // linkId 별로 후보를 그룹핑
+    // 한 linkId에 후보가 1개면 바로 결정, 여러 개면 좌표로 해소
+    Map<String, List<LinkCandidateVo>> grouped = candidates.stream()
+        .collect(Collectors.groupingBy(c -> c.getLinkId().toString()));
+
+    // (2) 도엽 중복이 있는 링크가 있는지 확인 → 있으면 시작점 좌표 조회
+    boolean hasAmbiguous = grouped.values().stream().anyMatch(list -> list.size() > 1);
+
+    Geometry startPoint = null;
+    if (hasAmbiguous) {
+        // 시작 노드 좌표 1번만 조회 (후처리에서 거리 계산용)
+        startPoint = dao.selectNodeXy(Map.of(
+            "nodeId",    startNodeId,
+            "nodeMapId", startNodeMapId
+        ));
+    }
+
+    // (3) 결과 매핑 구성
+    Map<String, Integer> result = new LinkedHashMap<>();
+    for (String linkId : linkIds) {
+        List<LinkCandidateVo> cands = grouped.get(linkId);
+
+        if (cands == null || cands.isEmpty()) {
+            // 못 찾음
+            result.put(linkId, 0);
+
+        } else if (cands.size() == 1) {
+            // 후보가 유일 → 그대로 사용
+            result.put(linkId, cands.get(0).getLinkMapId());
+
+        } else {
+            // 후보 다수 → 시작점에서 가장 가까운 링크의 도엽 선택
+            int closestMapId = pickClosest(cands, startPoint);
+            result.put(linkId, closestMapId);
+        }
+    }
+    return result;
+}
+
+/** 시작점에서 가장 가까운 후보의 LINK_MAP_ID 반환 */
+private int pickClosest(List<LinkCandidateVo> cands, Geometry startPoint) {
+    if (startPoint == null) return cands.get(0).getLinkMapId(); // fallback
+
+    double minDist = Double.MAX_VALUE;
+    int    chosen  = cands.get(0).getLinkMapId();
+
+    for (LinkCandidateVo c : cands) {
+        double dist = c.getLinkXyGrs().distance(startPoint);
+        if (dist < minDist) {
+            minDist = dist;
+            chosen  = c.getLinkMapId();
+        }
+    }
+    return chosen;
+}
