@@ -1,0 +1,108 @@
+<!--
+    링크 ID 목록에 해당하는 모든 후보 링크를 조회하면서,
+    시작 노드의 좌표로부터의 거리를 함께 반환한다.
+    
+    - linkIds : 조회할 링크 ID 목록
+    - startNodeId, startNodeMapId : 거리 계산 기준점
+-->
+<select id="selectLinkCandidatesWithDistance" resultType="LinkCandidateWithDistVo">
+    DECLARE @startPoint geometry;
+    
+    SELECT @startPoint = NODE_XY_GRS
+    FROM   RTM_NODE
+    WHERE  NODE_ID     = #{startNodeId}
+      AND  NODE_MAP_ID = #{startNodeMapId};
+    
+    SELECT 
+        l.LINK_ID                              AS linkId,
+        l.LINK_MAP_ID                          AS linkMapId,
+        l.ST_ND_ID                             AS stNdId,
+        l.ED_ND_ID                             AS edNdId,
+        l.LINK_XY_GRS.STDistance(@startPoint)  AS distance
+    FROM   RTM_LINK l
+    WHERE  l.LINK_ID IN
+    <foreach item="id" collection="linkIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
+
+/**
+ * 링크 후보 + 시작점으로부터의 거리 정보
+ * SQL Server의 STDistance 결과를 그대로 담는 형태
+ */
+public class LinkCandidateWithDistVo {
+    private Integer linkId;       // LINK_ID
+    private Integer linkMapId;    // LINK_MAP_ID  
+    private Integer stNdId;       // ST_ND_ID
+    private Integer edNdId;       // ED_ND_ID
+    private Double  distance;     // 시작점에서의 거리 (STDistance 결과)
+    
+    // getter/setter 생략
+}
+
+/**
+ * 시작 노드 위치를 기준으로 주어진 링크 ID들의 도엽 ID를 찾는다.
+ *
+ * 처리 방식:
+ *  - 모든 링크 후보를 IN 쿼리 1번으로 조회 (BFS 없음)
+ *  - 도엽 중복이 있는 링크는 시작점에서 가장 가까운 도엽 선택
+ *  - 거리 계산은 SQL Server의 STDistance로 처리
+ *
+ * @param startNodeId    시작 노드 ID (거리 계산 기준점)
+ * @param startNodeMapId 시작 노드 도엽 ID
+ * @param linkIds        도엽 ID를 알고 싶은 링크 ID 목록 (순서 무관)
+ * @return linkId → linkMapId 매핑 (찾지 못한 링크는 0)
+ */
+private Map<String, Integer> getMapIdsByNode(
+        String startNodeId,
+        String startNodeMapId,
+        Collection<String> linkIds) throws IOException {
+
+    if (linkIds == null || linkIds.isEmpty()) {
+        return Collections.emptyMap();
+    }
+
+    // (1) 링크 후보 + 거리 정보를 한 번의 쿼리로 조회
+    List<LinkCandidateWithDistVo> candidates = dao.selectLinkCandidatesWithDistance(Map.of(
+        "startNodeId",    startNodeId,
+        "startNodeMapId", startNodeMapId,
+        "linkIds",        linkIds
+    ));
+
+    // (2) linkId 별로 후보 그룹핑
+    //     동일 링크 ID가 여러 도엽에 존재할 수 있으므로 List로 수집
+    Map<String, List<LinkCandidateWithDistVo>> grouped = candidates.stream()
+        .collect(Collectors.groupingBy(c -> c.getLinkId().toString()));
+
+    // (3) 각 입력 linkId에 대해 결과 결정
+    Map<String, Integer> result = new LinkedHashMap<>();
+
+    for (String linkId : linkIds) {
+        List<LinkCandidateWithDistVo> cands = grouped.get(linkId);
+
+        if (cands == null || cands.isEmpty()) {
+            // 후보 없음 → 0으로 표기
+            result.put(linkId, 0);
+            continue;
+        }
+
+        if (cands.size() == 1) {
+            // 후보가 유일 → 그대로 사용
+            result.put(linkId, cands.get(0).getLinkMapId());
+            continue;
+        }
+
+        // 후보가 여러 개 → 거리가 가장 짧은 후보 선택
+        // (distance가 null인 경우는 안전하게 뒤로 보내기)
+        LinkCandidateWithDistVo closest = cands.stream()
+            .min(Comparator.comparing(
+                LinkCandidateWithDistVo::getDistance,
+                Comparator.nullsLast(Comparator.naturalOrder())
+            ))
+            .get();
+
+        result.put(linkId, closest.getLinkMapId());
+    }
+
+    return result;
+}
