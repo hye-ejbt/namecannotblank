@@ -1,0 +1,109 @@
+private Map<String, Map<Integer, Integer>> getMapIdsByNode(
+        int startNodeId,
+        int startNodeMapId,
+        Collection<Integer> linkIds) throws IOException {
+
+    Map<Integer, Integer> distMap       = new HashMap<>();
+    Map<Integer, Integer> linkIdToMapId = new HashMap<>();
+    Map<String, Map<Integer, Integer>> result = new HashMap<>();
+    result.put("distMap", distMap);
+    result.put("linkIds", linkIdToMapId);
+
+    if (linkIds == null || linkIds.isEmpty()) return result;
+
+    Set<Integer> targetLinkIds = new HashSet<>(linkIds);
+
+    Set<Integer> loadedMapIds = new HashSet<>();
+    Map<Long, NodeVo> nodeIndex = new HashMap<>();
+    Map<Long, List<LinkVo>> adjacency = new HashMap<>();
+    loadMapData(startNodeMapId, loadedMapIds, nodeIndex, adjacency);
+
+    // ─────────────────────────────────────────────────────────────
+    // 다익스트라: 누적 거리 기준 우선순위 큐
+    // 큐 원소: [nodeId, mapId, accumulatedDistance(double)]
+    // ─────────────────────────────────────────────────────────────
+    PriorityQueue<double[]> pq = new PriorityQueue<>(
+        Comparator.comparingDouble(a -> a[2])
+    );
+    Map<Long, Double> nodeMinDist = new HashMap<>();   // 노드별 최단 거리
+    Set<Integer> visitedLinks = new HashSet<>();
+
+    long startKey = nodeKey(startNodeId, startNodeMapId);
+    pq.offer(new double[]{startNodeId, startNodeMapId, 0.0});
+    nodeMinDist.put(startKey, 0.0);
+
+    // 정렬용 시퀀스 카운터 (도착한 순서대로 1, 2, 3... 부여)
+    int arrivalOrder = 0;
+
+    while (!pq.isEmpty()) {
+        double[] cur = pq.poll();
+        int curNodeId    = (int) cur[0];
+        int curNodeMapId = (int) cur[1];
+        double curDist   = cur[2];
+
+        long curKey = nodeKey(curNodeId, curNodeMapId);
+        // 더 짧은 경로가 이미 찾아졌으면 스킵
+        if (curDist > nodeMinDist.getOrDefault(curKey, Double.MAX_VALUE)) continue;
+
+        List<LinkVo> connected = adjacency.getOrDefault(
+            curKey, Collections.emptyList());
+
+        for (LinkVo link : connected) {
+            int linkId    = link.getLinkId();
+            int linkMapId = link.getLinkMapId();
+
+            // 입력 링크 집합 외엔 무시
+            if (!targetLinkIds.contains(linkId)) continue;
+            // 같은 링크 중복 방문 방지
+            if (!visitedLinks.add(linkId)) continue;
+
+            // 누적 거리 = 현재 노드까지의 거리 + 이 링크의 길이
+            double linkLen = link.getLengthGrs() != null ? link.getLengthGrs() : 0.0;
+            double newDist = curDist + linkLen;
+
+            // 결과 기록 - 도착 순서를 distMap의 값으로 사용
+            // (distMap이 Integer 타입이므로 누적 거리 직접 X, 도착 순번 사용)
+            distMap.put(linkId, ++arrivalOrder);
+            linkIdToMapId.put(linkId, linkMapId);
+
+            if (visitedLinks.size() == targetLinkIds.size()) {
+                pq.clear();
+                break;
+            }
+
+            // 반대편 노드 결정
+            int oppositeNodeId = link.getStNdId() == curNodeId
+                ? link.getEdNdId() : link.getStNdId();
+
+            NodeVo oppNode = nodeIndex.get(nodeKey(oppositeNodeId, linkMapId));
+
+            int nextNodeId, nextNodeMapId;
+            if (oppNode != null
+                    && oppNode.getNodeKind() != null
+                    && oppNode.getNodeKind() == 7
+                    && oppNode.getAdjNodeId() != null) {
+                nextNodeId    = oppNode.getAdjNodeId();
+                nextNodeMapId = oppNode.getAdjNodeMapId();
+                if (!loadedMapIds.contains(nextNodeMapId)) {
+                    loadMapData(nextNodeMapId, loadedMapIds, nodeIndex, adjacency);
+                }
+            } else {
+                nextNodeId    = oppositeNodeId;
+                nextNodeMapId = linkMapId;
+            }
+
+            long nextKey = nodeKey(nextNodeId, nextNodeMapId);
+            // 더 짧은 경로일 때만 큐에 추가
+            if (newDist < nodeMinDist.getOrDefault(nextKey, Double.MAX_VALUE)) {
+                nodeMinDist.put(nextKey, newDist);
+                pq.offer(new double[]{nextNodeId, nextNodeMapId, newDist});
+            }
+        }
+    }
+
+    for (Integer linkId : linkIds) {
+        distMap.putIfAbsent(linkId, Integer.MAX_VALUE);
+        linkIdToMapId.putIfAbsent(linkId, 0);
+    }
+    return result;
+}
