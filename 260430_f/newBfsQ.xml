@@ -1,0 +1,41 @@
+<!-- (1) 입력 링크가 분포한 도엽 식별 -->
+<select id="selectMapIdsByLinkIds" resultType="Integer">
+    SELECT DISTINCT LINK_MAP_ID
+    FROM   RTM_LINK
+    WHERE  LINK_ID IN
+    <foreach item="id" collection="linkIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
+
+<!-- (2) 해당 도엽들의 모든 링크 -->
+<select id="selectLinksByMapIds" resultType="LinkVo">
+    SELECT 
+        LINK_ID     AS linkId,
+        LINK_MAP_ID AS linkMapId,
+        ST_ND_ID    AS stNdId,
+        ED_ND_ID    AS edNdId
+    FROM   RTM_LINK
+    WHERE  LINK_MAP_ID IN
+    <foreach item="id" collection="mapIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
+
+<!-- (3) 해당 도엽들의 노드 + 인접 도엽 짝 노드 -->
+<select id="selectNodesByMapIds" resultType="NodeVo">
+    SELECT 
+        n.NODE_ID            AS nodeId,
+        n.NODE_MAP_ID        AS nodeMapId,
+        n.NODE_KIND          AS nodeKind,
+        adj.ADJ_NODE_ID      AS adjNodeId,
+        adj.ADJ_NODE_MAP_ID  AS adjNodeMapId
+    FROM      RTM_NODE n
+    LEFT JOIN RTN_ADJ_NODE adj
+           ON adj.NODE_ID     = n.NODE_ID
+          AND adj.NODE_MAP_ID = n.NODE_MAP_ID
+    WHERE  n.NODE_MAP_ID IN
+    <foreach item="id" collection="mapIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
