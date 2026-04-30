@@ -1,11 +1,16 @@
 /**
- * BFS로 그래프 탐색하여 입력 링크들의 hop 수와 도엽 ID를 반환한다.
- * 
- * Lazy 도엽 로딩 전략:
- *  - 시작 도엽 1개만 먼저 로드
- *  - BFS가 도엽 경계 노드(NODE_KIND=7)를 만나 점프할 때 해당 도엽이 미로드면 그때 로드
- *  - 한 번 로드된 도엽은 메모리에 캐시되어 재사용
- *  - link_id가 전 도엽에 중복되어도 영향 없음 (실제 진행 경로만 로드)
+ * 시작 노드에서 입력 링크들로만 구성된 부분 그래프를 BFS 탐색하여
+ * 각 링크의 도달 순서(hop)와 도엽 ID를 반환한다.
+ *
+ * 핵심:
+ *  - 입력 링크 집합 외의 링크는 절대 따라가지 않음
+ *    → 우회 경로로 인한 잘못된 hop 부여 방지
+ *  - 도엽 경계 노드를 만나면 짝 노드로 점프
+ *    → 도엽이 바뀌면서 link_id가 동일해도 정확한 도엽으로 진행
+ *
+ * @return Map with:
+ *   - "distMap": linkId → BFS hop 수 (작을수록 시작점에 가까움)
+ *   - "linkIds": linkId → linkMapId
  */
 private Map<String, Map<Integer, Integer>> getMapIdsByNode(
         int startNodeId,
@@ -23,25 +28,23 @@ private Map<String, Map<Integer, Integer>> getMapIdsByNode(
     Set<Integer> targetLinkIds = new HashSet<>(linkIds);
 
     // ─────────────────────────────────────────────────────────────
-    // 메모리 인덱스 (도엽이 추가 로드될 때마다 누적됨)
+    // 메모리 인덱스 (도엽 lazy 로딩)
     // ─────────────────────────────────────────────────────────────
     Set<Integer> loadedMapIds = new HashSet<>();
     Map<Long, NodeVo> nodeIndex = new HashMap<>();
     Map<Long, List<LinkVo>> adjacency = new HashMap<>();
 
-    // ─────────────────────────────────────────────────────────────
-    // 시작 도엽만 로드하고 BFS 시작
-    // ─────────────────────────────────────────────────────────────
     loadMapData(startNodeMapId, loadedMapIds, nodeIndex, adjacency);
 
-    Set<Long> visited = new HashSet<>();
-    Deque<long[]> queue = new ArrayDeque<>();   // [nodeId, mapId, hop]
+    // ─────────────────────────────────────────────────────────────
+    // BFS - 입력 링크 집합 안에서만 진행
+    // ─────────────────────────────────────────────────────────────
+    Set<Long> visitedNodes = new HashSet<>();
+    Set<Integer> visitedLinks = new HashSet<>();   // 같은 링크를 중복 카운트하지 않음
+    Deque<long[]> queue = new ArrayDeque<>();      // [nodeId, mapId, hop]
 
     queue.offer(new long[]{startNodeId, startNodeMapId, 0});
-    visited.add(nodeKey(startNodeId, startNodeMapId));
-
-    // 다음 BFS 단계에서 점프할 미로드 도엽들 (batch 로딩용)
-    Set<Integer> pendingMapIds = new HashSet<>();
+    visitedNodes.add(nodeKey(startNodeId, startNodeMapId));
 
     while (!queue.isEmpty()) {
         long[] cur = queue.poll();
@@ -55,22 +58,26 @@ private Map<String, Map<Integer, Integer>> getMapIdsByNode(
         for (LinkVo link : connected) {
             int linkId    = link.getLinkId();
             int linkMapId = link.getLinkMapId();
-            int nextHop   = curHop + 1;
 
-            // 입력 링크면 결과 기록
-            if (targetLinkIds.contains(linkId)) {
-                distMap.putIfAbsent(linkId, nextHop);
-                linkIdToMapId.putIfAbsent(linkId, linkMapId);
+            // ★ 입력 링크 집합에 없으면 무시 (핵심 변경점)
+            if (!targetLinkIds.contains(linkId)) continue;
 
-                // 모든 입력 링크 찾으면 즉시 종료
-                if (linkIdToMapId.size() == targetLinkIds.size()) {
-                    queue.clear();
-                    pendingMapIds.clear();
-                    break;
-                }
+            // 이미 방문한 링크면 스킵
+            if (!visitedLinks.add(linkId)) continue;
+
+            int nextHop = curHop + 1;
+
+            // 결과 기록
+            distMap.put(linkId, nextHop);
+            linkIdToMapId.put(linkId, linkMapId);
+
+            // 모든 입력 링크 방문 완료 시 즉시 종료
+            if (visitedLinks.size() == targetLinkIds.size()) {
+                queue.clear();
+                break;
             }
 
-            // 반대편 노드 결정
+            // 반대편 노드로 진행
             int oppositeNodeId = link.getStNdId() == curNodeId
                 ? link.getEdNdId() : link.getStNdId();
 
@@ -87,9 +94,9 @@ private Map<String, Map<Integer, Integer>> getMapIdsByNode(
                 nextNodeId    = oppNode.getAdjNodeId();
                 nextNodeMapId = oppNode.getAdjNodeMapId();
 
-                // 점프 대상 도엽이 미로드면 pending에 추가
+                // 점프 대상 도엽이 미로드면 즉시 로드
                 if (!loadedMapIds.contains(nextNodeMapId)) {
-                    pendingMapIds.add(nextNodeMapId);
+                    loadMapData(nextNodeMapId, loadedMapIds, nodeIndex, adjacency);
                 }
             } else {
                 nextNodeId    = oppositeNodeId;
@@ -97,32 +104,9 @@ private Map<String, Map<Integer, Integer>> getMapIdsByNode(
             }
 
             long nextKey = nodeKey(nextNodeId, nextNodeMapId);
-            if (visited.add(nextKey)) {
+            if (visitedNodes.add(nextKey)) {
                 queue.offer(new long[]{nextNodeId, nextNodeMapId, nextHop});
             }
-        }
-
-        // ─────────────────────────────────────────────────────────
-        // 큐가 비었는데 pending 도엽이 있으면 batch 로드 후 BFS 계속
-        // (여러 경계 노드가 같은 단계에서 발견되면 한 번에 로드 → DB 호출 절감)
-        // ─────────────────────────────────────────────────────────
-        if (queue.isEmpty() && !pendingMapIds.isEmpty()) {
-            loadMapDataBatch(pendingMapIds, loadedMapIds, nodeIndex, adjacency);
-
-            // 새 도엽이 로드되면, 점프해 들어왔던 노드들이 이제 연결 정보를 갖게 됨
-            // → 이 노드들에서 다시 BFS 진행 가능하도록 큐에 재투입
-            for (Long visKey : new ArrayList<>(visited)) {
-                int vNodeId  = (int) (visKey >> 32);
-                int vMapId   = (int) (visKey & 0xFFFFFFFFL);
-                if (pendingMapIds.contains(vMapId)
-                        && adjacency.containsKey(visKey)) {
-                    // 이 노드에서 아직 탐색 안 한 링크가 있으므로 재방문 큐 투입
-                    // hop 정보는 보존 (정확한 hop 추적 필요 시 별도 Map 유지)
-                    queue.offer(new long[]{vNodeId, vMapId, 0});
-                    // hop=0은 임시값, 정확한 hop이 중요하면 visitedHop Map 별도 운영
-                }
-            }
-            pendingMapIds.clear();
         }
     }
 
@@ -133,51 +117,4 @@ private Map<String, Map<Integer, Integer>> getMapIdsByNode(
     }
 
     return result;
-}
-
-// ─────────────────────────────────────────────────────────────
-// 도엽 데이터 로딩 헬퍼
-// ─────────────────────────────────────────────────────────────
-
-/** 단일 도엽 로드 후 메모리 인덱스에 추가 */
-private void loadMapData(
-        int mapId,
-        Set<Integer> loadedMapIds,
-        Map<Long, NodeVo> nodeIndex,
-        Map<Long, List<LinkVo>> adjacency) {
-    loadMapDataBatch(Set.of(mapId), loadedMapIds, nodeIndex, adjacency);
-}
-
-/** 여러 도엽을 한 번에 로드 (DB 호출 횟수 절감) */
-private void loadMapDataBatch(
-        Set<Integer> mapIds,
-        Set<Integer> loadedMapIds,
-        Map<Long, NodeVo> nodeIndex,
-        Map<Long, List<LinkVo>> adjacency) {
-
-    // 이미 로드된 건 제외
-    Set<Integer> toLoad = new HashSet<>(mapIds);
-    toLoad.removeAll(loadedMapIds);
-    if (toLoad.isEmpty()) return;
-
-    // 링크/노드 일괄 조회 (DB 호출 2회)
-    List<LinkVo> links = dao.selectLinksByMapIds(Map.of("mapIds", toLoad));
-    List<NodeVo> nodes = dao.selectNodesByMapIds(Map.of("mapIds", toLoad));
-
-    // 메모리 인덱스에 누적
-    for (NodeVo n : nodes) {
-        nodeIndex.putIfAbsent(nodeKey(n.getNodeId(), n.getNodeMapId()), n);
-    }
-    for (LinkVo l : links) {
-        adjacency.computeIfAbsent(nodeKey(l.getStNdId(), l.getLinkMapId()),
-                                  k -> new ArrayList<>()).add(l);
-        adjacency.computeIfAbsent(nodeKey(l.getEdNdId(), l.getLinkMapId()),
-                                  k -> new ArrayList<>()).add(l);
-    }
-
-    loadedMapIds.addAll(toLoad);
-}
-
-private static long nodeKey(int nodeId, int mapId) {
-    return ((long) nodeId << 32) | (mapId & 0xFFFFFFFFL);
 }
