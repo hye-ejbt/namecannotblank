@@ -1,0 +1,89 @@
+<!--
+    해당 도엽들의 노드 정보 + 인접 도엽 짝 노드 매핑을 한 번에 조회.
+    RTN_ADJ_NODE 테이블에 (NODE_ID, NODE_MAP_ID) → (ADJ_NODE_ID, ADJ_NODE_MAP_ID) 매핑 존재.
+    
+    경계 노드(NODE_KIND=7)만 RTN_ADJ_NODE에 매핑이 있다고 가정 (LEFT JOIN으로 안전 처리).
+-->
+<select id="selectNodesByMapIds" resultType="NodeVo">
+    SELECT 
+        n.NODE_ID            AS nodeId,
+        n.NODE_MAP_ID        AS nodeMapId,
+        n.NODE_KIND          AS nodeKind,
+        adj.ADJ_NODE_ID      AS adjNodeId,
+        adj.ADJ_NODE_MAP_ID  AS adjNodeMapId
+    FROM      RTM_NODE n
+    LEFT JOIN RTN_ADJ_NODE adj
+           ON adj.NODE_ID     = n.NODE_ID
+          AND adj.NODE_MAP_ID = n.NODE_MAP_ID
+    WHERE  n.NODE_MAP_ID IN
+    <foreach item="id" collection="mapIds" open="(" close=")" separator=",">
+        #{id}
+    </foreach>
+</select>
+
+
+public class NodeVo {
+    private Integer nodeId;
+    private Integer nodeMapId;
+    private Integer nodeKind;
+    private List<AdjNode> adjNodes = new ArrayList<>();  // 여러 짝 지원
+    // getter/setter
+    
+    public static class AdjNode {
+        private Integer adjNodeId;
+        private Integer adjNodeMapId;
+        // getter/setter
+    }
+}
+
+
+
+--------------------
+
+
+// 노드 위치 → 노드 정보 (인접 노드 리스트 통합)
+Map<String, NodeVo> nodeIndex = new HashMap<>();
+
+for (NodeVo row : allNodes) {
+    String key = nodeKey(row.getNodeId(), row.getNodeMapId());
+    NodeVo existing = nodeIndex.get(key);
+    
+    if (existing == null) {
+        // 첫 등장: 그대로 등록
+        if (row.getAdjNodeId() != null) {
+            NodeVo.AdjNode adj = new NodeVo.AdjNode();
+            adj.setAdjNodeId(row.getAdjNodeId());
+            adj.setAdjNodeMapId(row.getAdjNodeMapId());
+            row.getAdjNodes().add(adj);
+        }
+        nodeIndex.put(key, row);
+    } else if (row.getAdjNodeId() != null) {
+        // 이미 등록된 노드: 인접 노드만 추가
+        NodeVo.AdjNode adj = new NodeVo.AdjNode();
+        adj.setAdjNodeId(row.getAdjNodeId());
+        adj.setAdjNodeMapId(row.getAdjNodeMapId());
+        existing.getAdjNodes().add(adj);
+    }
+}
+
+--------------------
+
+
+if (oppNode != null && oppNode.getNodeKind() != null
+        && oppNode.getNodeKind() == 7
+        && !oppNode.getAdjNodes().isEmpty()) {
+    
+    // 도엽 경계 노드 → 모든 인접 도엽 짝 노드를 큐에 투입
+    for (NodeVo.AdjNode adj : oppNode.getAdjNodes()) {
+        String adjKey = nodeKey(adj.getAdjNodeId(), adj.getAdjNodeMapId());
+        if (visitedNodes.add(adjKey)) {
+            queue.offer(new NodePos(adj.getAdjNodeId(), adj.getAdjNodeMapId()));
+        }
+    }
+} else {
+    // 일반 노드 → 그대로 진행
+    String nextKey = nodeKey(oppositeNodeId, linkMapId);
+    if (visitedNodes.add(nextKey)) {
+        queue.offer(new NodePos(oppositeNodeId, linkMapId));
+    }
+}
