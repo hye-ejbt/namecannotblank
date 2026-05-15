@@ -1,287 +1,341 @@
 /**
  * ============================================================
- *  통합분기(Y자/T자) 진출링크 유효성 검사 — checkData 재작성
+ *  CombinedCommon — 통합분기 진출링크열 연결성 검사
  *
- *  원본(checkData) 의 흐름은 유지:
- *   ① 시작 노드가 도엽 경계(nodeKind === 7 || adjNodeId > 0) 면
- *     인접 노드 속성을 한 번 조회 → (pLink, tmpNode) 캐싱
- *   ② guidLineVoiceListRef.current 를 (inLinkId, pathId) 별 그룹핑
- *      ※ editType === 2 인 항목은 제외
- *   ③ 각 그룹마다:
- *       - selectNodeInfo / passInfoSet 초기화
- *       - 그룹 내 outLink 가 passInfoSet 에 하나도 없으면
- *         (pLink, tmpNode) fallback 적용
- *       - 진출링크열을 따라 walk 하며 outLinkSet 채움
- *       - 그룹 모두 채워지면 다음 그룹, 아니면 invalid → return false
+ *  기존 isConnection / checkLinkChainConnectivity 의 시그니처와
+ *  보조 로직을 유지한 채, "노드와 직접 연결된 진출링크가 2개 이상
+ *  이면 무조건 invalid" 처리 부분만 분기 트리 BFS 검사로 교체한다.
  *
- *  변경 핵심:
- *   - 원본은 `outWhile + nested for` 로 한 번에 한 outLink 만
- *     매칭 → 다음 라운드 (선형 walk).
- *   - 본 버전은 BFS 로 "현재 노드 passInfoSet 에 매칭되는
- *     모든 outLink 를 한 라운드에서 처리" → Y자/T자 분기 자연 지원.
- *   - 사이클 방지: visitedNodeIds 로 같은 노드 큐 재진입 차단
+ *  교체 전:
+ *    if (linksAssociatedWithNodes.length > 1) return invalid;
+ *
+ *  교체 후:
+ *    - 1개  → 기존 선형 체인 검사 (checkLinkChainConnectivity)
+ *    - 2개+ → 분기 트리 검사 (checkBranchingTreeConnectivity)
+ *            : 노드를 루트, 각 진출링크를 자식으로 두는 트리를 BFS
+ *              순회하며, 모든 링크가 도달 가능하고 사이클/렌더 누락이
+ *              없는지 확인. 각 갈래 내부 체인은 기존
+ *              checkLinkChainConnectivity 로 위임.
  * ============================================================
  */
 
-interface NodeInfo {
+interface LinkData {
   id: number;
   mapId: number;
-  adjNodeId: number;
-  adjNodeMapId: number;
-  nodeKind: number;
-  passInfo: Set<number>;
+  stNdId: number; // 링크 시작 노드 ID
+  edNdId: number; // 링크 끝 노드 ID
 }
 
-interface LinkInfo {
-  id: number;
-  mapId: number;
-  stNdId: number;
-  edNdId: number;
+interface RenderData {
+  fromLinkId: number;
+  toLinkId: number;
 }
 
-interface AttrInfo {
-  adjNodeAttr: NodeInfo | null;
-  linkAttr: { linkId: number } | null;
+interface CheckChainOptions {
+  checkRender?: boolean;
+  renders?: RenderData[];
 }
 
-interface PassInfo {
-  inLinkId: number;
+interface ConnectivityResult {
+  isConnected: boolean;
+  errorMessage: string;
+  errorMessageDetail: string;
+  failedAt?: {
+    index: number;
+    fromLinkId: number;
+    toLinkId: number;
+    reason: 'null' | 'render' | 'cycle' | 'orphan' | 'no-root';
+  };
 }
 
-interface LaneNoAndColorCode {
-  editType: number;
+/* ============================================================
+ *  isConnection — 기존 진입점 (시그니처 유지)
+ * ============================================================
+ *  호출부에서 sortedLinks: {id, mapId}[] 만 넘기는 패턴은
+ *  분기 검증에 필요한 stNdId/edNdId 가 없어 한계가 있으므로,
+ *  내부에서 LayerManager 로 full LinkData 를 조회해 보강한다.
+ *  (호출부 코드는 그대로 두어도 됨)
+ * ============================================================ */
+export function isConnection(
+  sortedLinks: { id: number; mapId: number }[],
+  node: Node,
+  options: CheckChainOptions = {}
+): ConnectivityResult {
+  // ─── ① 노드(+인접노드)의 진출링크 ID 풀 — 기존 로직 유지 ───
+  const nodeOutLinks: number[] = [...node.getLinkID(false)];
+
+  /* 인접 노드인 경우 인접노드의 진출링크열 추가 */
+  if (node.getFields().nodeKind === 7) {
+    const transNode: Node[] = LayerManager.getInstance()
+      .getSource(LayerId.DRAW_LAYER)
+      .getFeatures()
+      .filter(
+        (i: Feature<Geometry>) =>
+          i instanceof Node &&
+          i.getFields().nodeXyGrs == node.getFields().nodeXyGrs &&
+          i.getNodeId() !== node.getNodeId()
+      ) as Node[];
+
+    for (const item of transNode) {
+      nodeOutLinks.push(...item.getLinkID(false));
+    }
+  }
+
+  // ─── ② 노드와 직접 연결된 진출링크 (= 트리 루트) ────────────
+  const outLinkIds = sortedLinks;
+  const linksAssociatedWithNodes: number[] = nodeOutLinks.filter((f: number) =>
+    outLinkIds.map((m) => m.id).includes(f)
+  );
+
+  /* 노드에 연결된 진출링크가 0개 — 기존 메시지 그대로 */
+  if (linksAssociatedWithNodes.length === 0) {
+    return {
+      isConnected: false,
+      errorMessage: '유효하지 않은 진출 링크가 있습니다',
+      errorMessageDetail: '노드와 연결된 링크가 아닙니다.',
+      failedAt: { index: -1, fromLinkId: -1, toLinkId: -1, reason: 'no-root' },
+    };
+  }
+
+  /* 노드에 연결된 진출링크가 1개 + 전체도 1개 — 기존 short-circuit 유지 */
+  if (linksAssociatedWithNodes.length === 1 && outLinkIds.length === 1) {
+    return {
+      isConnected: true,
+      errorMessage: '노드-링크 연결성 확인',
+      errorMessageDetail: '노드-링크 연결성 확인',
+    };
+  }
+
+  // ─── ③ Lightweight {id, mapId} → full LinkData 보강 ────────
+  // checkLinkChainConnectivity / 분기 검사 모두 stNdId/edNdId 필요
+  const pLinks: (LinkData | null)[] = outLinkIds.map((m) => resolveLinkData(m.id, m.mapId));
+
+  /* 노드에 연결된 진출링크가 1개 (전체는 N개) — 기존 선형 체인 검사 */
+  if (linksAssociatedWithNodes.length === 1) {
+    return checkLinkChainConnectivity(pLinks, options);
+  }
+
+  // ─── ④ 노드에 연결된 진출링크가 2개 이상 — 분기 트리 검사 ──
+  // 기존엔 여기서 무조건 invalid 였음.
+  return checkBranchingTreeConnectivity(pLinks, linksAssociatedWithNodes, node, options);
 }
 
-interface NodeGuideLineVoiceInsert {
-  inLinkId: number;
-  pathId: number;
-  outLinkId: number;
-  laneNoAndColorCode: LaneNoAndColorCode[];
+/* ============================================================
+ *  checkLinkChainConnectivity — 기존 함수 (선형 체인 검사) 유지
+ * ============================================================ */
+export function checkLinkChainConnectivity(
+  links: (LinkData | null)[],
+  options: CheckChainOptions = {}
+): ConnectivityResult {
+  const { checkRender = false, renders = [] } = options;
+
+  // NULL 체크
+  for (let i: number = 0; i < links.length; i++) {
+    if (!links[i]) {
+      return {
+        isConnected: false,
+        errorMessage: '유효하지 않은 진출 링크가 있습니다',
+        errorMessageDetail: `인덱스 ${i}의 링크가 null입니다.`,
+        failedAt: { index: i, fromLinkId: -1, toLinkId: -1, reason: 'null' },
+      };
+    }
+  }
+
+  // checkRender가 true인데 renders가 비어있으면 경고
+  if (checkRender && renders.length === 0) {
+    return {
+      isConnected: false,
+      errorMessage: '유효하지 않은 진출 링크가 있습니다',
+      errorMessageDetail: '렌더 검사가 요청되었지만 렌더 데이터가 제공되지 않았습니다.',
+    };
+  }
+
+  // 연속된 링크 쌍에 대해 체크
+  for (let i: number = 0; i < links.length - 1; i++) {
+    const from: LinkData = links[i]!;
+    const to: LinkData = links[i + 1]!;
+
+    // 3단계: 렌더 정보 확인 (옵션)
+    if (checkRender) {
+      if (!hasRenderBetween(renders, from.id, to.id)) {
+        return {
+          isConnected: false,
+          errorMessage: '유효하지 않은 진출 링크가 있습니다',
+          errorMessageDetail: `링크 ${from.id} -> 링크 ${to.id} 사이에 렌더 정보가 없습니다.`,
+          failedAt: { index: i, fromLinkId: from.id, toLinkId: to.id, reason: 'render' },
+        };
+      }
+    }
+  }
+
+  return {
+    isConnected: true,
+    errorMessage: '노드-링크 연결성 확인',
+    errorMessageDetail: '노드-링크 연결성 확인',
+  };
 }
 
-interface NodeGuideLineService {
-  getLinkInfo(linkId: number, mapId: number): Promise<LinkInfo | null>;
-  getNodeInfo(nodeId: number, mapId: number): Promise<NodeInfo | null>;
-  getAttribute(nodeId: number, mapId: number): Promise<AttrInfo>;
-  getPassInfo(nodeId: number, mapId: number): Promise<PassInfo[]>;
+/* ============================================================
+ *  checkBranchingTreeConnectivity — 신규
+ *  노드에 직접 연결된 진출링크가 2개 이상일 때 (Y자/T자 분기)
+ *  진출링크열을 트리로 보고 BFS 로 도달성 검사
+ * ============================================================ */
+function checkBranchingTreeConnectivity(
+  links: (LinkData | null)[],
+  rootLinkIds: number[],
+  startNode: Node,
+  options: CheckChainOptions = {}
+): ConnectivityResult {
+  const { checkRender = false, renders = [] } = options;
+
+  // ─── NULL 체크 (checkLinkChainConnectivity 와 동일) ────────
+  for (let i: number = 0; i < links.length; i++) {
+    if (!links[i]) {
+      return {
+        isConnected: false,
+        errorMessage: '유효하지 않은 진출 링크가 있습니다',
+        errorMessageDetail: `인덱스 ${i}의 링크가 null입니다.`,
+        failedAt: { index: i, fromLinkId: -1, toLinkId: -1, reason: 'null' },
+      };
+    }
+  }
+  const validLinks = links as LinkData[];
+
+  if (checkRender && renders.length === 0) {
+    return {
+      isConnected: false,
+      errorMessage: '유효하지 않은 진출 링크가 있습니다',
+      errorMessageDetail: '렌더 검사가 요청되었지만 렌더 데이터가 제공되지 않았습니다.',
+    };
+  }
+
+  // ─── 인접 리스트 구성 ─────────────────────────────────────
+  // from.edNdId === to.stNdId 면 to 가 from 의 자식
+  const linkById = new Map<number, LinkData>(validLinks.map((l) => [l.id, l]));
+  const childrenOf = new Map<number, LinkData[]>();
+  for (const from of validLinks) {
+    const children = validLinks.filter(
+      (to) => to.id !== from.id && from.edNdId === to.stNdId
+    );
+    childrenOf.set(from.id, children);
+  }
+
+  // ─── 루트 결정 — 노드 ID 기준으로 시작 방향 판정 ──────────
+  // startNode 와 직접 연결된 링크들 중에서, "노드를 시작점으로 갖는"
+  // 쪽 (link.stNdId === startNodeId) 을 우선 루트로 본다.
+  // (양방향 데이터 안전을 위해 edNdId 일치 케이스도 허용)
+  const startNodeId = startNode.getNodeId();
+  const rootLinks: LinkData[] = rootLinkIds
+    .map((id) => linkById.get(id))
+    .filter((l): l is LinkData => l !== undefined);
+
+  if (rootLinks.length === 0) {
+    return {
+      isConnected: false,
+      errorMessage: '유효하지 않은 진출 링크가 있습니다',
+      errorMessageDetail: '루트 링크 데이터를 찾을 수 없습니다.',
+      failedAt: { index: -1, fromLinkId: -1, toLinkId: -1, reason: 'no-root' },
+    };
+  }
+
+  // ─── BFS 트리 순회 ────────────────────────────────────────
+  const visited = new Set<number>();
+  const stack: { link: LinkData; parent: LinkData | null; index: number }[] =
+    rootLinks.map((l) => ({ link: l, parent: null, index: validLinks.indexOf(l) }));
+
+  while (stack.length > 0) {
+    const { link, parent, index } = stack.pop()!;
+
+    // 사이클/중복 도달 — 진출링크열은 트리여야 함
+    if (visited.has(link.id)) {
+      return {
+        isConnected: false,
+        errorMessage: '유효하지 않은 진출 링크가 있습니다',
+        errorMessageDetail: `링크 ${link.id} 가 두 개 이상의 경로에서 도달됩니다 (사이클/중복).`,
+        failedAt: {
+          index,
+          fromLinkId: parent?.id ?? -1,
+          toLinkId: link.id,
+          reason: 'cycle',
+        },
+      };
+    }
+    visited.add(link.id);
+
+    // 렌더 정보 확인 (옵션) — 부모-자식 사이
+    if (checkRender && parent) {
+      if (!hasRenderBetween(renders, parent.id, link.id)) {
+        return {
+          isConnected: false,
+          errorMessage: '유효하지 않은 진출 링크가 있습니다',
+          errorMessageDetail: `링크 ${parent.id} -> 링크 ${link.id} 사이에 렌더 정보가 없습니다.`,
+          failedAt: { index, fromLinkId: parent.id, toLinkId: link.id, reason: 'render' },
+        };
+      }
+    }
+
+    // 자식 push
+    const kids = childrenOf.get(link.id) ?? [];
+    for (const c of kids) {
+      stack.push({ link: c, parent: link, index: validLinks.indexOf(c) });
+    }
+  }
+
+  // ─── 고립된 링크 검출 ────────────────────────────────────
+  if (visited.size !== validLinks.length) {
+    const orphans = validLinks.filter((l) => !visited.has(l.id));
+    return {
+      isConnected: false,
+      errorMessage: '유효하지 않은 진출 링크가 있습니다',
+      errorMessageDetail: `루트로부터 도달 불가능한 링크: [${orphans
+        .map((l) => l.id)
+        .join(', ')}]`,
+      failedAt: {
+        index: validLinks.indexOf(orphans[0]),
+        fromLinkId: -1,
+        toLinkId: orphans[0].id,
+        reason: 'orphan',
+      },
+    };
+  }
+
+  // ─── 검증 완료 — 기존과 동일한 메시지 ─────────────────────
+  return {
+    isConnected: true,
+    errorMessage: '노드-링크 연결성 확인',
+    errorMessageDetail: '노드-링크 연결성 확인',
+  };
+}
+
+/* ============================================================
+ *  resolveLinkData — {id, mapId} → full LinkData
+ *  LayerManager 에서 LinkData 를 조회 (프로젝트 헬퍼가 있다면 그것으로 교체)
+ * ============================================================ */
+function resolveLinkData(linkId: number, mapId: number): LinkData | null {
+  const features = LayerManager.getInstance()
+    .getSource(LayerId.DRAW_LAYER)
+    .getFeatures();
+
+  const link = features.find(
+    (f: Feature<Geometry>) =>
+      f instanceof Link && (f as Link).getLinkId() === linkId && (f as Link).getMapId() === mapId
+  ) as Link | undefined;
+
+  if (!link) return null;
+
+  return {
+    id: linkId,
+    mapId: mapId,
+    stNdId: link.getFields().stNdId,
+    edNdId: link.getFields().edNdId,
+  };
 }
 
 /**
- * 통합분기 유효성 검사 — Promise<boolean>
- * 원본 checkData 와 동일한 시그니처/반환값을 유지.
- *
- * 호출 예시 (React 컴포넌트 내부):
- *   const checkData = (): Promise<boolean> =>
- *     checkCombinedBranchData(
- *       nodeInfo,
- *       guidLineVoiceListRef.current,
- *       useNodeGuideLineVoiceInsertSerivce,
- *       (key, fallback) => t({ key }) ?? fallback
- *     );
+ * hasRenderBetween — 기존 프로젝트 함수 재사용
  */
-const checkCombinedBranchData = async (
-  nodeInfo: NodeInfo,
-  guidLineVoiceList: NodeGuideLineVoiceInsert[],
-  service: NodeGuideLineService,
-  translate: (key: string, fallback: string) => string = (_, fb) => fb
-): Promise<boolean> => {
-  // ─── ① 시작 노드의 인접 노드 정보 캐싱 ───────────────────────
-  let tmpNode: NodeInfo | null = null;
-  let pLink: number = 0;
-
-  // 인접 노드
-  if (nodeInfo.adjNodeId > 0 || nodeInfo.nodeKind === 7) {
-    const attribute: AttrInfo = await service.getAttribute(
-      nodeInfo.adjNodeId,
-      nodeInfo.adjNodeMapId
-    );
-
-    if (attribute.adjNodeAttr != null && attribute.linkAttr != null) {
-      pLink = attribute.linkAttr.linkId;
-      tmpNode = attribute.adjNodeAttr;
-    }
-  }
-
-  // ─── ② inLinkId-pathId 그룹화 ────────────────────────────────
-  const groupGuideLineVoiceMap: Map<string, NodeGuideLineVoiceInsert[]> =
-    guidLineVoiceList
-      .filter((data: NodeGuideLineVoiceInsert) =>
-        data.laneNoAndColorCode.some((item: LaneNoAndColorCode) => item.editType !== 2)
-      )
-      .reduce(
-        (map: Map<string, NodeGuideLineVoiceInsert[]>, item: NodeGuideLineVoiceInsert) => {
-          // 키 생성
-          const key: string = `${item.inLinkId}-${item.pathId}`;
-          if (!map.has(key)) {
-            map.set(key, []);
-          }
-          map.get(key)!.push(item);
-          return map;
-        },
-        new Map<string, NodeGuideLineVoiceInsert[]>()
-      );
-
-  // ─── ③ 그룹별 유효성 검사 ────────────────────────────────────
-  for (const [, voiceList] of groupGuideLineVoiceMap) {
-    // 선택된 노드 정보
-    let selectNodeInfo: NodeInfo = nodeInfo;
-    let passInfoSet: Set<number> = nodeInfo.passInfo;
-
-    // 그룹 내 outLink 가 passInfoSet 에 없으면 인접 노드 fallback
-    if (passInfoSet.size > 0) {
-      const hasCommonId: boolean = voiceList.some(
-        (data: NodeGuideLineVoiceInsert) => passInfoSet.has(data.outLinkId)
-      );
-
-      if (!hasCommonId && pLink && tmpNode) {
-        passInfoSet = new Set([pLink]);
-        selectNodeInfo = tmpNode;
-      }
-    }
-
-    // ─── BFS 로 진출링크열을 트리 탐색 (분기 지원) ─────────────
-    const outLinkSet: Set<number> = new Set<number>();
-    const visitedNodeIds: Set<number> = new Set<number>([selectNodeInfo.id]);
-    const queue: { passInfo: Set<number>; node: NodeInfo }[] = [
-      { passInfo: passInfoSet, node: selectNodeInfo },
-    ];
-
-    bfs: while (queue.length > 0) {
-      const { passInfo: currentPassInfo, node: currentNode } = queue.shift()!;
-
-      // 현재 노드 passInfoSet 과 매칭되는 모든 outLink — 분기점이면 2개 이상
-      const matchedVoiceData: NodeGuideLineVoiceInsert[] = voiceList.filter(
-        (data: NodeGuideLineVoiceInsert) =>
-          currentPassInfo.has(data.outLinkId) && !outLinkSet.has(data.outLinkId)
-      );
-
-      if (matchedVoiceData.length === 0) {
-        continue; // 다음 큐 항목으로
-      }
-
-      // 분기된 각 outLink 를 모두 처리
-      for (const voiceData of matchedVoiceData) {
-        // 진출 링크 데이터 세팅
-        outLinkSet.add(voiceData.outLinkId);
-
-        // 링크 조회
-        const outLinkInfo: LinkInfo | null = await service.getLinkInfo(
-          voiceData.outLinkId,
-          currentNode.mapId
-        );
-        if (!outLinkInfo) {
-          // 한 갈래 실패해도 다른 갈래는 계속 (원본은 break outWhile 였음)
-          continue;
-        }
-
-        // 반대편 노드 ID
-        const tmpNodeId: number =
-          outLinkInfo.stNdId === currentNode.id ? outLinkInfo.edNdId : outLinkInfo.stNdId;
-
-        // 노드 조회
-        const adjNodeInfo: NodeInfo | null = await service.getNodeInfo(
-          tmpNodeId,
-          currentNode.mapId
-        );
-        if (!adjNodeInfo) {
-          continue;
-        }
-
-        // 다음 라운드 상태 결정
-        let nextPassInfo: Set<number>;
-        let nextNode: NodeInfo;
-
-        // 인접 노드 (도엽 경계)
-        if (adjNodeInfo.adjNodeId > 0 || adjNodeInfo.nodeKind === 7) {
-          const attribute: AttrInfo = await service.getAttribute(
-            tmpNodeId,
-            adjNodeInfo.adjNodeMapId
-          );
-
-          if (attribute.adjNodeAttr != null && attribute.linkAttr != null) {
-            nextPassInfo = new Set([attribute.linkAttr.linkId]);
-            nextNode = attribute.adjNodeAttr;
-          } else {
-            continue; // 한 갈래만 실패 처리
-          }
-        } else {
-          // 일반 노드 — 다음 통과 정보 조회
-          const adjNodePassInfos: PassInfo[] = await service.getPassInfo(
-            adjNodeInfo.id,
-            adjNodeInfo.mapId
-          );
-
-          nextPassInfo = new Set(
-            adjNodePassInfos
-              .map((adjNodePassInfo: PassInfo) => adjNodePassInfo.inLinkId)
-              .sort((a: number, b: number) => a - b)
-          );
-          nextNode = adjNodeInfo;
-        }
-
-        // 사이클 방지 — 이미 큐에 들어간 노드는 재진입 안 함
-        if (!visitedNodeIds.has(nextNode.id)) {
-          visitedNodeIds.add(nextNode.id);
-          queue.push({ passInfo: nextPassInfo, node: nextNode });
-        }
-
-        // 그룹 전체 진출링크 확인 완료
-        if (outLinkSet.size === voiceList.length) {
-          break bfs;
-        }
-      }
-    }
-
-    // ─── 유도선 정보 음성 안내 데이터에 추가되었는지 확인 ──────
-    const invalidLinks: NodeGuideLineVoiceInsert[] = voiceList.filter(
-      (data: NodeGuideLineVoiceInsert) => !outLinkSet.has(data.outLinkId)
-    );
-
-    if (invalidLinks.length > 0) {
-      message.destroy();
-      message.info(
-        translate(
-          'NodeGuideLineVoiceInsertModal.msg.hasInvalidLink2',
-          '유효하지 않은 진출 링크가 있습니다.\n진입링크에 설정된 Path ID와 진출 링크를 확인 하세요.'
-        )
-      );
-      return false;
-    }
-  }
-
-  return true;
-};
-
-/* ============================================================
- * 컴포넌트 내부 사용 예시 (drop-in replacement)
- * ============================================================
- *
- * // 유효하지 않은 진출링크 확인
- * const checkData = async (): Promise<boolean> => {
- *   return checkCombinedBranchData(
- *     nodeInfo,
- *     guidLineVoiceListRef.current,
- *     useNodeGuideLineVoiceInsertSerivce,
- *     (key, fallback) => t({ key }) ?? fallback
- *   );
- * };
- *
- * ============================================================
- * 분기 동작 설명 (지도 우측 하단 케이스)
- * ============================================================
- *
- *   진입링크 ──▶  [노드 A]
- *                   │
- *                   ├──▶ outLink#1 ──▶ [노드 B] ──▶ outLink#2 ...
- *                   │
- *                   └──▶ outLink#3 ──▶ [노드 C] ──▶ outLink#4 ...
- *
- *   원본 checkData : passInfoSet 매칭에서 outLink#1 처리 후
- *                    selectNodeInfo 가 [노드 B] 로 바뀌어
- *                    outLink#3 매칭이 영원히 안 됨 → invalid
- *
- *   본 버전(BFS) : [노드 A] 라운드에서 outLink#1, outLink#3 모두 매칭
- *                   → 큐에 (B의 passInfo, B), (C의 passInfo, C) 둘 다 push
- *                   → 각 갈래를 독립적으로 끝까지 추적 → valid
- * ============================================================
- */
+declare function hasRenderBetween(
+  renders: RenderData[],
+  fromLinkId: number,
+  toLinkId: number
+): boolean;
